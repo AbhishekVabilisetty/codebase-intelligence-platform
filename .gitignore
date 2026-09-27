@@ -1,0 +1,28 @@
+# Secrets
+backend/.env
+.env
+.env.local
+
+# Python environments and generated files
+backend/venv/
+**/__pycache__/
+*.py[cod]
+
+# Application data generated while repositories are analyzed
+backend/cache/
+backend/chroma_db/
+backend/temp_repos/
+
+# Local tooling
+.pytest_cache/
+.coverage
+.vscode/
+
+# Local servers and diagnostic output
+*.log
+*.local.err.log
+*.local.log
+
+# Operating-system files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codebase Intelligence</title>
+  <link rel="stylesheet" href="styles.css?v=20260927">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/vis-network.min.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <h1>Codebase Intelligence</h1>
+    <div class="header-controls">
+      <label for="global-repo">Repository</label>
+      <select id="global-repo" onchange="onGlobalRepoChange()"><option value="">Select repository</option></select>
+      <span class="api-indicator"><span class="status-dot" id="api-status"></span>API</span>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <nav class="navigation" aria-label="Main navigation">
+      <button class="nav-btn active" data-tab="analyze" onclick="showTab('analyze')">Analyze repository</button>
+      <button class="nav-btn" data-tab="overview" onclick="showTab('overview')">Architecture</button>
+      <button class="nav-btn" data-tab="query" onclick="showTab('query')">Ask a question</button>
+      <button class="nav-btn" data-tab="bugs" onclick="showTab('bugs')">Bugs</button>
+      <button class="nav-btn" data-tab="smells" onclick="showTab('smells')">Code smells</button>
+      <button class="nav-btn" data-tab="patterns" onclick="showTab('patterns')">Patterns</button>
+      <button class="nav-btn" data-tab="debt" onclick="showTab('debt')">Technical debt</button>
+      <button class="nav-btn" data-tab="graph" onclick="showTab('graph')">Dependency graph</button>
+      <button class="nav-btn" data-tab="tools" onclick="showTab('tools')">Tools</button>
+      <button class="nav-btn" data-tab="repos" onclick="showTab('repos')">Repositories</button>
+      <div class="recent-repos"><strong>Recent repositories</strong><div id="sidebar-repo-list"><p class="muted-sm">None yet</p></div></div>
+    </nav>
+
+    <main class="main-content">
+      <h2 id="page-title">Analyze Repository</h2>
+
+      <section id="tab-analyze" class="tab active">
+        <p>Enter a public GitHub repository URL to analyze it.</p>
+        <div class="card">
+          <label for="repo-url">GitHub URL</label>
+          <input id="repo-url" type="url" placeholder="https://github.com/user/repository">
+          <label for="repo-branch">Branch</label>
+          <input id="repo-branch" type="text" value="main">
+          <button class="btn btn-primary" id="analyze-btn" onclick="analyzeRepository()">Analyze repository</button>
+          <div id="analysis-status" class="alert" style="display:none"></div>
+        </div>
+      </section>
+
+      <section id="tab-overview" class="tab">
+        <p>Generate a summary for the selected repository.</p>
+        <div class="card"><button class="btn" onclick="loadArchSummary()">Generate architecture summary</button><div id="arch-result" class="result-box" style="display:none"><div id="arch-text" class="answer-content"></div></div></div>
+        <div class="card" id="arch-stats-card" style="display:none"><h3>Codebase statistics</h3><div id="arch-stats" class="stats-grid"></div></div>
+      </section>
+
+      <section id="tab-query" class="tab">
+        <p>Ask a question about the selected repository.</p>
+        <div class="card">
+          <label for="question-input">Question</label>
+          <textarea id="question-input" rows="4" placeholder="Where is authentication implemented?"></textarea>
+          <div class="example-questions"><button class="eq-btn" onclick="setQ('What is the overall architecture of this codebase?')">Architecture overview</button><button class="eq-btn" onclick="setQ('How does authentication work?')">Authentication</button><button class="eq-btn" onclick="setQ('How are errors handled?')">Error handling</button></div>
+          <button class="btn btn-primary" onclick="askQuestion()">Ask question</button>
+          <div id="qa-result" class="result-box" style="display:none"><div class="result-header"><h3>Answer</h3><span id="confidence-score" class="badge"></span></div><div id="answer-text" class="answer-content"></div><div id="learning-resources" class="learning-resources" hidden></div></div>
+        </div>
+      </section>
+
+      <section id="tab-bugs" class="tab"><p>Find static-analysis issues in the selected repository.</p><div class="card"><button class="btn" onclick="loadBugs()">Load bugs</button><div id="bugs-container"></div></div></section>
+      <section id="tab-smells" class="tab"><p>Find code smells in the selected repository.</p><div class="card"><button class="btn" onclick="loadSmells()">Load code smells</button><div id="smells-container"></div></div></section>
+      <section id="tab-patterns" class="tab"><p>Find detected design patterns.</p><div class="card"><button class="btn" onclick="loadPatterns()">Load patterns</button><div id="patterns-container"></div></div></section>
+      <section id="tab-debt" class="tab"><p>View the technical-debt report.</p><div class="card"><button class="btn" onclick="loadDebt()">Calculate technical debt</button><div id="debt-container"></div></div></section>
+      <section id="tab-graph" class="tab"><p>View module and class relationships.</p><div class="card"><button class="btn" onclick="loadGraph()">Render graph</button><div id="graph-container"></div></div></section>
+
+      <section id="tab-tools" class="tab">
+        <p>Tools for the selected repository.</p>
+        <div class="card"><div class="tools-grid"><button class="btn" onclick="explainEntity()">Explain entity</button><button class="btn" onclick="findImplementation()">Find implementation</button><button class="btn" onclick="getRefactoring()">Refactoring suggestions</button><button class="btn" onclick="generateTests()">Generate tests</button></div><div id="tool-result" class="result-box" style="display:none"><div id="tool-text" class="answer-content"></div></div></div>
+      </section>
+
+      <section id="tab-repos" class="tab"><p>Repositories that have been analyzed.</p><div id="repos-list" class="repos-grid"><p class="muted-sm">No repositories analyzed yet.</p></div></section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

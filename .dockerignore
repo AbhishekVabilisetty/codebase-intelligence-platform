@@ -1,0 +1,16 @@
+.git
+backend/.env
+backend/venv
+backend/__pycache__
+backend/cache
+backend/chroma_db
+backend/temp_repos
+**/__pycache__
+frontend
+*.log
+backend/.env
+backend/venv
+backend/cache
+backend/chroma_db
+backend/temp_repos
+**/__pycache__
