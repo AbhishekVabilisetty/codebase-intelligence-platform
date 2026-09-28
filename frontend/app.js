@@ -5,6 +5,8 @@ function setApiStatus(online) {
     document.querySelectorAll("#api-status, #api-status-landing").forEach(dot => {
         dot.classList.toggle("offline", !online);
     });
+    const label = document.getElementById("api-status-label");
+    if (label) label.textContent = online ? "API connected" : "API unavailable";
 }
 
 async function readApiResponse(res) {
@@ -52,14 +54,63 @@ function showTab(name) {
 }
 
 // ── Global repo selector ────────────────────────────────────────
-function onGlobalRepoChange() {
+async function onGlobalRepoChange() {
     currentRepo = document.getElementById("global-repo").value;
+    const repo = currentRepo;
+    if (!repo) {
+        updateDashboardMetrics();
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API}/repository/${encodeURIComponent(repo)}`);
+        const data = await readApiResponse(res);
+        if (currentRepo !== repo) return;
+        updateDashboardMetrics({
+            entities_found: data.entity_count,
+            chunks_indexed: data.chunk_count,
+            bugs_found: (data.bugs || []).length,
+            smells_found: (data.smells || []).length,
+            patterns_found: (data.patterns || []).length,
+            debt_grade: data.debt?.grade || "—",
+        });
+    } catch (err) {
+        console.error("Could not load selected repository metrics:", err);
+        updateDashboardMetrics();
+    }
 }
 
 function getRepo() {
     currentRepo = document.getElementById("global-repo").value;
     if (!currentRepo) { alert("Please select a repository from the top bar first."); return null; }
     return currentRepo;
+}
+
+function updateDashboardMetrics(data = {}) {
+    const repoName = currentRepo || "No repository connected";
+    const badge = document.getElementById("repo-badge");
+    if (badge) badge.textContent = repoName;
+
+    const kpis = {
+        entities: document.getElementById("kpi-entities"),
+        chunks: document.getElementById("kpi-chunks"),
+        issues: document.getElementById("kpi-issues"),
+        debt: document.getElementById("kpi-debt"),
+    };
+
+    if (!currentRepo || !data || Object.keys(data).length === 0) {
+        kpis.entities.textContent = "—";
+        kpis.chunks.textContent = "—";
+        kpis.issues.textContent = "—";
+        kpis.debt.textContent = "—";
+        return;
+    }
+
+    const issuesTotal = Number(data.bugs_found || 0) + Number(data.smells_found || 0) + Number(data.patterns_found || 0);
+    kpis.entities.textContent = data.entities_found ?? "—";
+    kpis.chunks.textContent = data.chunks_indexed ?? "—";
+    kpis.issues.textContent = String(issuesTotal);
+    kpis.debt.textContent = data.debt_grade || "—";
 }
 
 // ── API health ──────────────────────────────────────────────────
@@ -100,6 +151,7 @@ async function analyzeRepository() {
             `<strong>${data.patterns_found}</strong> patterns · ` +
             `Debt grade <strong>${data.debt_grade}</strong>`;
         currentRepo = data.repo_id;
+        updateDashboardMetrics(data);
         await loadRepositories();
         document.getElementById("global-repo").value = data.repo_id;
     } catch (err) {
@@ -126,6 +178,20 @@ async function loadRepositories() {
         document.getElementById("global-repo").innerHTML = opts;
         if (currentRepo) document.getElementById("global-repo").value = currentRepo;
 
+        const currentRepoData = repos.find(r => r.repo_id === currentRepo);
+        if (currentRepoData) {
+            updateDashboardMetrics({
+                entities_found: currentRepoData.entity_count,
+                chunks_indexed: currentRepoData.chunk_count,
+                bugs_found: 0,
+                smells_found: 0,
+                patterns_found: 0,
+                debt_grade: currentRepoData.debt_grade || "—",
+            });
+        } else {
+            updateDashboardMetrics();
+        }
+
         // Repos tab
         const gradeColor = { A: "#10b981", B: "#84cc16", C: "#f59e0b", D: "#f97316", F: "#ef4444" };
         document.getElementById("repos-list").innerHTML = repos.length
@@ -134,6 +200,7 @@ async function loadRepositories() {
                     <h4>${r.repo_id}</h4>
                     <p><a href="${r.url}" target="_blank">${r.url}</a></p>
                     <p>${new Date(r.analyzed_at).toLocaleString()}</p>
+                    <button class="btn" type="button" onclick="rebuildRepository('${r.repo_id}', this)">Rebuild search index</button>
                     <div class="repo-stats">
                         <div class="repo-stat"><strong>${r.entity_count}</strong> entities</div>
                         <div class="repo-stat"><strong>${r.chunk_count}</strong> chunks</div>
@@ -149,6 +216,37 @@ function selectRepo(id) {
     document.getElementById("global-repo").value = id;
     showTab("overview");
     loadArchSummary();
+}
+
+async function rebuildRepository(repoId, button) {
+    if (!confirm(`Rebuild the search index for ${repoId}? This reclones the repository and uses the embedding API.`)) return;
+
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = "Rebuilding…";
+    try {
+        const repo = await readApiResponse(await fetch(`${API}/repository/${encodeURIComponent(repoId)}`));
+        const data = await readApiResponse(await fetch(`${API}/analyze`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                repo_url: repo.url,
+                branch: repo.branch || "main",
+                languages: ["python", "javascript"],
+                force_reindex: true,
+            }),
+        }));
+        currentRepo = repoId;
+        await loadRepositories();
+        document.getElementById("global-repo").value = repoId;
+        updateDashboardMetrics(data);
+        alert(`Search index rebuilt for ${repoId}. Try your question again.`);
+    } catch (err) {
+        alert(`Could not rebuild the search index: ${err.message}`);
+        button.textContent = originalLabel;
+    } finally {
+        button.disabled = false;
+    }
 }
 
 // ── Architecture summary ────────────────────────────────────────
@@ -167,13 +265,26 @@ async function loadArchSummary() {
         // Stats
         const repoData = await (await fetch(`${API}/repository/${repo}`)).json();
         const arch = repoData.architecture || {};
+        updateDashboardMetrics({
+            entities_found: repoData.entity_count || 0,
+            chunks_indexed: repoData.chunk_count || 0,
+            bugs_found: (repoData.bugs || []).length,
+            smells_found: (repoData.smells || []).length,
+            patterns_found: (repoData.patterns || []).length,
+            debt_grade: repoData.debt?.grade || "—",
+        });
         document.getElementById("arch-stats-card").style.display = "block";
         document.getElementById("arch-stats").innerHTML = `
             <div class="stat-box"><strong>${arch.file_count || 0}</strong><span>Files</span></div>
             <div class="stat-box"><strong>${arch.total_lines_of_code?.toLocaleString() || 0}</strong><span>Lines of Code</span></div>
             <div class="stat-box"><strong>${repoData.entity_count || 0}</strong><span>Entities</span></div>
             <div class="stat-box"><strong>${repoData.chunk_count || 0}</strong><span>Code Chunks</span></div>`;
-    } catch (err) { text.innerHTML = `<span style="color:var(--error)">${err.message}</span>`; }
+    } catch (err) {
+        const message = err.message.includes("generativelanguage.googleapis.com") || err.message.includes("Gemini API")
+            ? "AI architecture summary is currently unavailable. Please check the Gemini API key, model settings, and service quota."
+            : err.message;
+        text.innerHTML = `<span style="color:var(--error)">${message}</span>`;
+    }
 }
 
 // ── Q&A ─────────────────────────────────────────────────────────
@@ -204,9 +315,11 @@ async function askQuestion() {
     const box  = document.getElementById("qa-result");
     const text = document.getElementById("answer-text");
     const conf = document.getElementById("confidence-score");
+    const model = document.getElementById("answer-model");
     box.style.display = "block";
     text.innerHTML = `<span class="spinner"></span>Thinking…`;
     conf.textContent = "";
+    model.textContent = "";
     renderLearningResources([]);
 
     try {
@@ -219,6 +332,7 @@ async function askQuestion() {
         if (res.ok) {
             text.innerHTML = marked.parse(data.answer);
             renderLearningResources(data.learning_resources);
+            model.textContent = data.model ? `Answered by ${data.model}` : "";
             const pct = (data.confidence * 100).toFixed(1);
             conf.textContent = `Confidence: ${pct}%`;
             conf.className = `badge${data.confidence < 0.3 ? " low" : ""}`;

@@ -96,7 +96,11 @@ async def analyze_repository(repo_input: RepositoryInput, background_tasks: Back
     # Reuse completed reports when a user retries the same repository instead
     # of repeating a clone and one embedding request per code chunk.
     cached = analyzed_repos.get(repo_id)
-    if cached and cached.get("url", "").rstrip("/") == repo_input.repo_url.rstrip("/"):
+    if (
+        cached
+        and not repo_input.force_reindex
+        and cached.get("url", "").rstrip("/") == repo_input.repo_url.rstrip("/")
+    ):
         debt = cached.get("debt", {})
         return {
             "status": "cached", "repo_id": repo_id,
@@ -165,6 +169,7 @@ async def analyze_repository(repo_input: RepositoryInput, background_tasks: Back
 
         metadata = {
             "url":          repo_input.repo_url,
+            "branch":       repo_input.branch,
             "analyzed_at":  datetime.now().isoformat(),
             "entity_count": len(entities),
             "chunk_count":  len(chunks),
@@ -208,7 +213,8 @@ async def query_codebase(qa_query: QAQuery):
         result = rag_system.answer_question(qa_query.repo_id, qa_query.question, qa_query.context_depth)
         return QAResponse(question=result["question"], answer=result["answer"],
                           relevant_chunks=[], confidence=result["confidence"],
-                          learning_resources=result.get("learning_resources", []))
+                          learning_resources=result.get("learning_resources", []),
+                          model=result.get("model"))
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -221,6 +227,7 @@ async def list_repositories():
             {
                 "repo_id":      rid,
                 "url":          m.get("url"),
+                "branch":       m.get("branch", "main"),
                 "analyzed_at":  m.get("analyzed_at"),
                 "entity_count": m.get("entity_count", 0),
                 "chunk_count":  m.get("chunk_count", 0),

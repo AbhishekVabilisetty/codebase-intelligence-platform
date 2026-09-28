@@ -6,6 +6,7 @@ class RepositoryInput(BaseModel):
     repo_url: str
     branch: str = "main"
     languages: List[str] = ["python", "javascript"]
+    force_reindex: bool = False
 
 
 class CodeChunk(BaseModel):
@@ -57,6 +58,7 @@ class QAResponse(BaseModel):
     relevant_chunks: List[CodeChunk]
     confidence: float
     learning_resources: List[Dict[str, str]] = []
+    model: Optional[str] = None
 
 
 class CodeSmell(BaseModel):
