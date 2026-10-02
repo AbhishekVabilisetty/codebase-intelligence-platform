@@ -10,6 +10,7 @@ from src.config import (
 )
 from src.embeddings.vector_store import VectorStore
 from src.rag.learning_resources import learning_resources
+from src.graphrag.code_graph import CodeGraphRetriever
 
 
 class RAGSystem:
@@ -71,56 +72,53 @@ class RAGSystem:
         routed_model = payload.get("model") or OPENROUTER_CHAT_MODEL
         return answer, f"OpenRouter / {routed_model}"
 
-    def _gemini_chat(self, system: str, user: str, max_tokens: int) -> str:
-        model_candidates = []
-        seen = set()
-        for model in [GEMINI_CHAT_MODEL, "gemini-3.8-flash"]:
-            if model and model not in seen:
-                model_candidates.append(model)
-                seen.add(model)
+    def _gemini_models(self) -> List[str]:
+        return list(dict.fromkeys(model for model in [GEMINI_CHAT_MODEL, "gemini-3.8-flash"] if model))
 
+    def _request_gemini(self, model_name: str, system: str, user: str, max_tokens: int) -> Dict:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
+            headers={"x-goog-api-key": self.chat_api_key},
+            json={
+                "contents": [{"role": "user", "parts": [{"text": f"{system}\n\n{user}"}]}],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens,
+                                     "thinkingConfig": {"thinkingBudget": 0}},
+            }, timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+        )
+        if response.status_code in {400, 404, 429, 500, 503}:
+            raise requests.HTTPError(f"{response.status_code} {response.reason}")
+        response.raise_for_status()
+        return response.json()
+
+    def _gemini_answer(self, payload: Dict) -> str:
+        candidates = payload.get("candidates", [])
+        if not candidates:
+            raise RuntimeError("Gemini returned no candidates.")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        answer = "".join(part.get("text", "") for part in parts).strip()
+        if not answer:
+            raise RuntimeError("Gemini returned no text response.")
+        return answer
+
+    def _gemini_failure(self, exc: Exception, is_last_model: bool):
+        message = str(exc).lower()
+        if "timed out" in message:
+            raise RuntimeError("Gemini did not respond within 30 seconds. Try a shorter question.") from exc
+        if not is_last_model:
+            return
+        if any(code in message for code in ("503", "500", "429", "not available", "not found")):
+            raise RuntimeError("Gemini API is currently unavailable. Check your API key, quota, and model configuration in backend/.env.") from exc
+        raise exc
+
+    def _gemini_chat(self, system: str, user: str, max_tokens: int) -> str:
+        model_candidates = self._gemini_models()
         last_exc = None
         for model_name in model_candidates:
             try:
-                response = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
-                    headers={"x-goog-api-key": self.chat_api_key},
-                    json={
-                        "contents": [{"role": "user", "parts": [{"text": f"{system}\n\n{user}"}]}],
-                        "generationConfig": {
-                            "temperature": 0.2,
-                            "maxOutputTokens": max_tokens,
-                            "thinkingConfig": {"thinkingBudget": 0},
-                        },
-                    },
-                    timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
-                )
-                if response.status_code in {400, 404, 429, 500, 503}:
-                    raise requests.HTTPError(f"{response.status_code} {response.reason}")
-                response.raise_for_status()
-                payload = response.json()
-                candidates = payload.get("candidates", [])
-                if not candidates:
-                    raise RuntimeError("Gemini returned no candidates.")
-                parts = candidates[0].get("content", {}).get("parts", [])
-                answer = "".join(part.get("text", "") for part in parts).strip()
-                if not answer:
-                    raise RuntimeError("Gemini returned no text response.")
-                return answer, model_name
+                return self._gemini_answer(self._request_gemini(model_name, system, user, max_tokens)), model_name
             except Exception as exc:
                 last_exc = exc
-                message = str(exc).lower()
-                if "timed out" in message:
-                    raise RuntimeError(
-                        "Gemini did not respond within 30 seconds. Try a shorter question."
-                    ) from exc
-                if model_name != model_candidates[-1]:
-                    continue
-                if "503" in message or "500" in message or "429" in message or "not available" in message or "not found" in message:
-                    raise RuntimeError(
-                        "Gemini API is currently unavailable. Check your API key, quota, and model configuration in backend/.env."
-                    ) from exc
-                raise
+                self._gemini_failure(exc, model_name == model_candidates[-1])
 
         if last_exc is not None:
             raise RuntimeError(str(last_exc))
@@ -137,7 +135,8 @@ class RAGSystem:
             )
         return "\n\n".join(parts)
 
-    def answer_question(self, repo_id: str, question: str, context_depth: int = 5) -> Dict:
+    def answer_question(self, repo_id: str, question: str, context_depth: int = 5,
+                        code_graph: Optional[Dict] = None) -> Dict:
         try:
             chunks = self.vector_store.search(repo_id, question, n_results=context_depth)
         except RuntimeError as exc:
@@ -155,13 +154,28 @@ class RAGSystem:
                 "relevant_chunks": [],
                 "confidence": 0.0,
             }
-        context = self._build_context(chunks)
+        graph_chunks = []
+        if code_graph:
+            references = CodeGraphRetriever(code_graph).expand(chunks)
+            graph_chunks = self.vector_store.get_chunks_for_references(repo_id, references)
+            seed_keys = {
+                (chunk["metadata"].get("file_path"), chunk["metadata"].get("name"), chunk["metadata"].get("start_line"))
+                for chunk in chunks
+            }
+            graph_chunks = [
+                chunk for chunk in graph_chunks
+                if (chunk["metadata"].get("file_path"), chunk["metadata"].get("name"), chunk["metadata"].get("start_line")) not in seed_keys
+            ]
+        all_chunks = chunks + graph_chunks
+        context = self._build_context(all_chunks)
         confidence = round(min(sum(c["relevance"] for c in chunks) / len(chunks), 1.0), 3)
         try:
             answer, model = self._chat_with_model(
                 system=(
                     "You are a patient senior developer teaching a junior developer about an unfamiliar codebase. "
                     "Answer only from the supplied code context; say what is uncertain instead of guessing. "
+                    "Some context may be included because it is connected to the semantic matches through the code dependency graph; "
+                    "use those relationships to explain end-to-end behavior, but do not claim a relationship that the supplied code does not show. "
                     "Use friendly, concrete markdown sections: **In simple words**, **How it works here**, "
                     "**Follow this path** (file and symbol names), **Why it matters**, and **Try this next**. "
                     "Define jargon briefly and finish with one safe, achievable hands-on next step."
@@ -169,22 +183,24 @@ class RAGSystem:
                 user=f"**Question:** {question}\n\n**Code Context:**\n{context}",
                 max_tokens=900,
             )
-            return {"question": question, "answer": answer, "relevant_chunks": chunks, "confidence": confidence,
+            return {"question": question, "answer": answer, "relevant_chunks": all_chunks, "confidence": confidence,
                     "learning_resources": learning_resources(question, chunks), "model": model}
         except Exception as e:
             return {"question": question, "answer": f"Error: {e}", "relevant_chunks": chunks, "confidence": 0.0,
                     "learning_resources": learning_resources(question, chunks), "model": None}
 
-    def explain_code(self, repo_id: str, entity_name: str) -> Dict:
+    def explain_code(self, repo_id: str, entity_name: str, code_graph: Optional[Dict] = None) -> Dict:
         return self.answer_question(
             repo_id,
             f"Explain `{entity_name}` in detail: what it does, its parameters, return values, and how it fits into the codebase.",
+            code_graph=code_graph,
         )
 
-    def find_implementation(self, repo_id: str, feature: str) -> Dict:
+    def find_implementation(self, repo_id: str, feature: str, code_graph: Optional[Dict] = None) -> Dict:
         return self.answer_question(
             repo_id,
             f"Where is `{feature}` implemented? Show the exact file path, line numbers, and explain the implementation.",
+            code_graph=code_graph,
         )
 
     def suggest_refactoring(self, repo_id: str) -> Dict:
@@ -193,14 +209,16 @@ class RAGSystem:
             return {"question": "Refactoring suggestions", "answer": "No code found.", "relevant_chunks": [], "confidence": 0.0}
         context = self._build_context(chunks)
         try:
-            answer = self._chat(
+            answer, model = self._chat_with_model(
                 system="You are an expert software architect. Give specific, actionable refactoring suggestions with before/after code examples.",
                 user=f"Review this code and provide 3-5 prioritised refactoring suggestions:\n\n{context}",
                 max_tokens=1500,
             )
-            return {"question": "Refactoring suggestions", "answer": answer, "relevant_chunks": chunks, "confidence": 0.8}
+            return {"question": "Refactoring suggestions", "answer": answer, "relevant_chunks": chunks, "confidence": 0.8,
+                    "model": model}
         except Exception as e:
-            return {"question": "Refactoring suggestions", "answer": f"Error: {e}", "relevant_chunks": chunks, "confidence": 0.0}
+            return {"question": "Refactoring suggestions", "answer": f"Error: {e}", "relevant_chunks": chunks, "confidence": 0.0,
+                    "model": None}
 
     def generate_unit_tests(self, repo_id: str, entity_name: str) -> Dict:
         chunks = self.vector_store.search(repo_id, entity_name, n_results=4)
@@ -209,7 +227,7 @@ class RAGSystem:
 
         context = self._build_context(chunks)
         try:
-            tests = self._chat(
+            tests, model = self._chat_with_model(
                 system=(
                     "You are an expert Python test engineer. Generate comprehensive pytest unit tests. "
                     "Include: happy path, edge cases, error cases. Use mocking where needed. "
@@ -218,9 +236,9 @@ class RAGSystem:
                 user=f"Generate pytest unit tests for `{entity_name}` based on this code:\n\n{context}",
                 max_tokens=2000,
             )
-            return {"entity": entity_name, "tests": tests, "framework": "pytest"}
+            return {"entity": entity_name, "tests": tests, "framework": "pytest", "model": model}
         except Exception as e:
-            return {"entity": entity_name, "tests": f"Error: {e}", "framework": "pytest"}
+            return {"entity": entity_name, "tests": f"Error: {e}", "framework": "pytest", "model": None}
 
     def generate_architecture_summary(self, repo_id: str) -> Dict:
         chunks = self.vector_store.search(repo_id, "architecture modules structure entry point main", n_results=8)
@@ -229,7 +247,7 @@ class RAGSystem:
         context = self._build_context(chunks)
 
         try:
-            summary = self._chat(
+            summary, model = self._chat_with_model(
                 system="You are a software architect. Analyse the codebase and produce a clear architecture overview.",
                 user=(
                     f"Based on this code, provide:\n"
@@ -242,7 +260,7 @@ class RAGSystem:
                 ),
                 max_tokens=1500,
             )
-            return {"summary": summary, "confidence": 0.85}
+            return {"summary": summary, "confidence": 0.85, "model": model}
         except Exception:
             file_paths = []
             for chunk in chunks:
@@ -280,4 +298,4 @@ class RAGSystem:
                 "**Entry Points**\n"
                 "The main execution paths are the FastAPI service for repository processing and search, and the browser client that triggers analysis and presentation workflows."
             )
-            return {"summary": summary, "confidence": 0.55}
+            return {"summary": summary, "confidence": 0.55, "model": "Local fallback (no LLM response)"}

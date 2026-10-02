@@ -58,19 +58,20 @@ class CodeSmellDetector:
                     ))
 
     def _detect_deep_nesting(self, tree: ast.AST, file_path: str, content: str):
-        """Detect deeply nested code blocks"""
-        max_depth = self._get_max_nesting_depth(tree)
-
-        if max_depth > 4:
-            severity = "high" if max_depth > 6 else "medium"
-            self.smells.append(CodeSmell(
-                type="deep_nesting",
-                severity=severity,
-                file_path=file_path,
-                line_number=1,
-                description=f"Code has nesting depth of {max_depth} levels (threshold: 4)",
-                suggestion="Consider extracting nested blocks into separate functions"
-            ))
+        """Report the deepest block inside its owning function, not file line 1."""
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            depth, line_number = self._get_max_nesting_depth(function)
+            if depth > 4:
+                severity = "high" if depth > 6 else "medium"
+                self.smells.append(CodeSmell(
+                    type="deep_nesting", severity=severity, file_path=file_path,
+                    line_number=line_number,
+                    description=(f"Function '{function.name}' reaches nesting depth {depth} "
+                                 f"(threshold: 4)"),
+                    suggestion="Extract the nested branch around this line into a focused helper function"
+                ))
 
     def _detect_complex_methods(self, tree: ast.AST, file_path: str, content: str):
         """Detect methods with high cyclomatic complexity"""
@@ -89,20 +90,16 @@ class CodeSmellDetector:
                         suggestion="Consider refactoring with simpler conditionals or extracting logic"
                     ))
 
-    def _get_max_nesting_depth(self, node: ast.AST, depth: int = 0) -> int:
-        """Calculate maximum nesting depth"""
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            depth += 1
-
-        if isinstance(node, (ast.If, ast.While, ast.For, ast.With)):
-            depth += 1
-
-        max_depth = depth
+    def _get_max_nesting_depth(self, node: ast.AST, depth: int = 0):
+        """Return the deepest control-flow depth and the exact source line."""
+        nesting_nodes = (ast.If, ast.While, ast.For, ast.AsyncFor, ast.With, ast.AsyncWith, ast.Try, ast.Match)
+        current_depth = depth + 1 if isinstance(node, nesting_nodes) else depth
+        deepest = (current_depth, getattr(node, "lineno", 1))
         for child in ast.iter_child_nodes(node):
-            child_depth = self._get_max_nesting_depth(child, depth)
-            max_depth = max(max_depth, child_depth)
-
-        return max_depth
+            child_result = self._get_max_nesting_depth(child, current_depth)
+            if child_result[0] > deepest[0]:
+                deepest = child_result
+        return deepest
 
     def _calculate_cyclomatic_complexity(self, node: ast.AST) -> int:
         """Calculate cyclomatic complexity"""

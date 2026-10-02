@@ -4,9 +4,37 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codebase Intelligence</title>
-  <link rel="stylesheet" href="styles.css?v=20260928-brand">
+  <link rel="stylesheet" href="styles.css?v=20261002-responsive-layout">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/vis-network.min.js"></script>
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <style>
+    .impact-controls { display:grid; grid-template-columns:minmax(240px,1fr) minmax(150px,.45fr) auto; gap:12px; align-items:end; }
+    .impact-controls label { margin-top:0; }
+    .impact-controls .btn-primary { margin:0; }
+    .impact-result { margin-top:22px; }
+    .impact-target { padding-bottom:16px; border-bottom:1px solid var(--line); }
+    .impact-target h3 { margin:2px 0 4px; }
+    .impact-stats { margin:16px 0; }
+    .impact-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .impact-columns h4 { margin-bottom:10px; color:var(--ink); font-size:13px; }
+    .impact-list { display:grid; gap:8px; padding:0; margin:0; list-style:none; }
+    .impact-list li { display:grid; gap:2px; padding:10px 12px; background:#fbfcfe; border:1px solid var(--line); border-radius:6px; }
+    .impact-list span { color:var(--muted); font-size:12px; }
+    @media (max-width:700px) { .impact-controls,.impact-columns { grid-template-columns:1fr; } }
+    .dependency-graph-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:20px 0 14px; margin-top:18px; border-top:1px solid var(--line); }
+    .dependency-graph-toolbar .eyebrow,.dependency-graph-toolbar .muted-sm { margin:0; }
+    .dependency-graph-container { position:relative; min-height:120px; height:min(580px,68vh); padding:14px; overflow:hidden; background:#fbfcfe; border:1px solid var(--line); border-radius:7px; }
+    .dependency-graph-container > .muted-sm { margin:0; }.dependency-graph-container canvas { outline:none; }
+    .dependency-graph-summary { position:absolute; right:12px; bottom:10px; z-index:2; max-width:calc(100% - 24px); padding:5px 8px; margin:0; color:#5c7089; background:rgba(255,255,255,.9); border:1px solid #dce5ef; border-radius:4px; font-size:11px; }
+    @media (max-width:700px) { .dependency-graph-toolbar { align-items:flex-start; flex-direction:column; }.dependency-graph-container { height:480px; } }
+    .impact-actions { display:flex; flex-wrap:wrap; gap:9px; }.impact-actions .btn { margin:14px 0 0; }
+    .risk-review-result { margin-top:20px; }.risk-review { padding:20px; background:#fbfcfe; border:1px solid var(--line); border-left:4px solid var(--success); border-radius:8px; }.risk-review.risk-medium { border-left-color:var(--warning); }.risk-review.risk-high { border-left-color:var(--error); }
+    .risk-review-header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-bottom:16px; border-bottom:1px solid var(--line); }.risk-review-header .muted-sm { margin:3px 0 0; }
+    .risk-score { min-width:90px; padding:10px; text-align:center; background:#fff; border:1px solid var(--line); border-radius:6px; }.risk-score strong { display:block; font-size:28px; line-height:1; }.risk-score span { color:var(--muted); font-size:11px; font-weight:700; text-transform:capitalize; }
+    .risk-evidence { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:16px 0; }.risk-evidence div { padding:12px; background:#fff; border:1px solid var(--line); border-radius:6px; }.risk-evidence strong,.risk-evidence span,.risk-evidence small { display:block; }.risk-evidence strong { font-size:20px; }.risk-evidence span { margin-top:2px; font-size:12px; font-weight:700; }.risk-evidence small,.risk-scope { margin:4px 0 0; color:var(--muted); font-size:11px; }
+    .risk-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }.risk-columns h4 { margin-bottom:8px; }.risk-columns ol,.risk-columns ul { display:grid; gap:7px; padding-left:20px; margin:0; color:var(--ink-soft); font-size:13px; }.risk-scope { padding-top:14px; margin-top:16px; border-top:1px solid var(--line); }
+    @media (max-width:700px) { .risk-evidence,.risk-columns { grid-template-columns:1fr; }.risk-review-header { align-items:flex-start; flex-direction:column; }.risk-score { min-width:0; } }
+  </style>
 </head>
 <body>
   <header class="site-header">
@@ -28,7 +56,7 @@
       <button class="nav-btn" data-tab="smells" onclick="showTab('smells')">Code smells</button>
       <button class="nav-btn" data-tab="patterns" onclick="showTab('patterns')">Patterns</button>
       <button class="nav-btn" data-tab="debt" onclick="showTab('debt')">Technical debt</button>
-      <button class="nav-btn" data-tab="graph" onclick="showTab('graph')">Dependency graph</button>
+      <button class="nav-btn" data-tab="impact" onclick="showTab('impact')">Dependency graph</button>
       <p class="nav-section-label">Utilities</p>
       <button class="nav-btn" data-tab="tools" onclick="showTab('tools')">Tools</button>
       <button class="nav-btn" data-tab="repos" onclick="showTab('repos')">Repositories</button>
@@ -84,7 +112,7 @@
 
       <section id="tab-overview" class="tab">
         <p class="tab-description">Generate a concise view of the selected repository’s components, entry points, and data flow.</p>
-        <div class="card"><button class="btn" onclick="loadArchSummary()">Generate architecture summary</button><div id="arch-result" class="result-box" style="display:none"><div id="arch-text" class="answer-content"></div></div></div>
+        <div class="card"><button class="btn" onclick="loadArchSummary()">Generate architecture summary</button><div id="arch-result" class="result-box" style="display:none"><div class="result-header"><h3>Architecture summary</h3><div class="answer-meta"><span id="arch-model" class="answer-model"></span></div></div><div id="arch-text" class="answer-content"></div></div></div>
         <div class="card" id="arch-stats-card" style="display:none"><h3>Codebase statistics</h3><div id="arch-stats" class="stats-grid"></div></div>
       </section>
 
@@ -93,7 +121,7 @@
         <div class="card">
           <label for="question-input">Question</label>
           <textarea id="question-input" rows="4" placeholder="Where is authentication implemented?"></textarea>
-          <div class="example-questions"><button class="eq-btn" onclick="setQ('What is the overall architecture of this codebase?')">Architecture overview</button><button class="eq-btn" onclick="setQ('How does authentication work?')">Authentication</button><button class="eq-btn" onclick="setQ('How are errors handled?')">Error handling</button></div>
+          <div id="example-questions" class="example-questions" aria-label="Suggested questions"><span class="muted-sm">Select a repository to see tailored questions.</span></div>
           <button class="btn btn-primary" onclick="askQuestion()">Ask question</button>
           <div id="qa-result" class="result-box" style="display:none"><div class="result-header"><h3>Answer</h3><div class="answer-meta"><span id="answer-model" class="answer-model"></span><span id="confidence-score" class="badge"></span></div></div><div id="answer-text" class="answer-content"></div><div id="learning-resources" class="learning-resources" hidden></div></div>
         </div>
@@ -103,16 +131,31 @@
       <section id="tab-smells" class="tab"><p class="tab-description">Review maintainability signals in the selected repository.</p><div class="card"><button class="btn" onclick="loadSmells()">Load code smells</button><div id="smells-container"></div></div></section>
       <section id="tab-patterns" class="tab"><p class="tab-description">Review patterns detected from the repository structure.</p><div class="card"><button class="btn" onclick="loadPatterns()">Load patterns</button><div id="patterns-container"></div></div></section>
       <section id="tab-debt" class="tab"><p class="tab-description">Review the consolidated technical-debt assessment.</p><div class="card"><button class="btn" onclick="loadDebt()">Calculate technical debt</button><div id="debt-container"></div></div></section>
-      <section id="tab-graph" class="tab"><p class="tab-description">Explore relationships between detected modules and classes.</p><div class="card"><button class="btn" onclick="loadGraph()">Render graph</button><div id="graph-container"></div></div></section>
+      <section id="tab-impact" class="tab">
+        <p class="tab-description">Explore repository-wide relationships, then assess the impact of changing a function, method, class, or exported symbol.</p>
+        <div class="card">
+          <div class="impact-controls">
+            <div><label for="impact-entity">Change target</label><select id="impact-entity" disabled><option>Select a repository first</option></select></div>
+            <div><label for="impact-hops">Impact depth</label><select id="impact-hops"><option value="1">Direct impact</option><option value="2">Up to 2 hops</option></select></div>
+            <button class="btn btn-primary" type="button" onclick="loadImpactExplorer()">Assess impact</button>
+          </div>
+          <div class="dependency-graph-toolbar">
+            <div><p class="eyebrow">Repository map</p><p class="muted-sm">Explore all indexed files and symbols. Select a symbol to assess its change impact.</p></div>
+            <button class="btn" type="button" onclick="loadDependencyGraph()">Render full graph</button>
+          </div>
+          <div id="dependency-graph-container" class="dependency-graph-container" aria-live="polite"><p class="muted-sm">Render the full graph to explore repository-wide relationships.</p></div>
+          <div id="impact-result" class="impact-result"><p class="muted-sm">Choose a repository, then assess a change target.</p></div>
+        </div>
+      </section>
 
       <section id="tab-tools" class="tab">
         <p class="tab-description">Use targeted actions to investigate and improve the selected repository.</p>
-        <div class="card"><div class="tools-grid"><button class="btn" onclick="explainEntity()">Explain entity</button><button class="btn" onclick="findImplementation()">Find implementation</button><button class="btn" onclick="getRefactoring()">Refactoring suggestions</button><button class="btn" onclick="generateTests()">Generate tests</button></div><div id="tool-result" class="result-box" style="display:none"><div id="tool-text" class="answer-content"></div></div></div>
+        <div class="card"><div class="tools-grid"><button class="btn" onclick="explainEntity()">Explain entity</button><button class="btn" onclick="findImplementation()">Find implementation</button><button class="btn" onclick="getRefactoring()">Refactoring suggestions</button><button class="btn" onclick="generateTests()">Generate tests</button></div><div id="tool-result" class="result-box" style="display:none"><div class="result-header"><h3 id="tool-result-title">AI result</h3><div class="answer-meta"><span id="tool-model" class="answer-model"></span></div></div><div id="tool-text" class="answer-content"></div></div></div>
       </section>
 
       <section id="tab-repos" class="tab"><p class="tab-description">Repositories with available analysis reports.</p><div id="repos-list" class="repos-grid"><p class="muted-sm">No repositories analyzed yet.</p></div></section>
     </main>
   </div>
-  <script src="app.js?v=20260928-answer-model"></script>
+  <script src="app.js?v=20261002-dependency-graph"></script>
 </body>
 </html>

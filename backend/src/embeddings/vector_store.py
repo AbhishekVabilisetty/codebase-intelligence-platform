@@ -110,6 +110,32 @@ class VectorStore:
                 })
         return formatted
 
+    def get_chunks_for_references(self, repo_id: str, references: List[Dict], limit: int = 8) -> List[Dict]:
+        """Fetch indexed code for graph-expanded symbols without recloning a repo."""
+        collection = self.get_or_create_collection(repo_id)
+        found, seen = [], set()
+        for ref in references:
+            if len(found) >= limit:
+                break
+            file_path, name = ref.get("file_path"), ref.get("name", "")
+            if not file_path:
+                continue
+            result = collection.get(where={"file_path": file_path}, include=["documents", "metadatas"])
+            for doc, metadata in zip(result.get("documents", []), result.get("metadatas", [])):
+                # Exact symbol is preferred. A module chunk is a useful fallback
+                # for JS/TS where parsing operates at file granularity.
+                if name and metadata.get("name") != name and metadata.get("chunk_type") != "module":
+                    continue
+                key = (metadata.get("file_path"), metadata.get("name"), metadata.get("start_line"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({"content": doc, "metadata": metadata, "distance": None,
+                              "relevance": 0.0, "graph_context": ref})
+                if len(found) >= limit:
+                    break
+        return found
+
     def clear_repository(self, repo_id: str):
         try:
             self.client.delete_collection(self._collection_name(repo_id))

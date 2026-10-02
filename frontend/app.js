@@ -1,5 +1,8 @@
 const API = "http://localhost:8000";
 let currentRepo = "";
+let lastImpactData = null;
+let dependencyNetwork = null;
+let lastRiskReview = null;
 
 function setApiStatus(online) {
     document.querySelectorAll("#api-status, #api-status-landing").forEach(dot => {
@@ -42,7 +45,7 @@ const TAB_TITLES = {
     analyze: "Analyze Repository", overview: "Architecture Overview",
     query: "Ask AI", bugs: "Bug Finder", smells: "Code Smells",
     patterns: "Design Patterns", debt: "Technical Debt",
-    graph: "Dependency Graph", tools: "AI Tools", repos: "Repositories",
+    impact: "Dependency Graph", tools: "AI Tools", repos: "Repositories",
 };
 
 function showTab(name) {
@@ -51,6 +54,7 @@ function showTab(name) {
     document.getElementById(`tab-${name}`).classList.add("active");
     document.getElementById("page-title").textContent = TAB_TITLES[name] || name;
     document.querySelector(`[data-tab="${name}"]`)?.classList.add("active");
+    if (name === "impact" && currentRepo) loadImpactExplorer();
 }
 
 // ── Global repo selector ────────────────────────────────────────
@@ -74,10 +78,56 @@ async function onGlobalRepoChange() {
             patterns_found: (data.patterns || []).length,
             debt_grade: data.debt?.grade || "—",
         });
+        renderSuggestedQuestions(data);
     } catch (err) {
         console.error("Could not load selected repository metrics:", err);
         updateDashboardMetrics();
+        renderSuggestedQuestions();
     }
+}
+
+function renderSuggestedQuestions(repoData) {
+    const container = document.getElementById("example-questions");
+    if (!container) return;
+    container.replaceChildren();
+
+    if (!repoData || !currentRepo) {
+        const hint = document.createElement("span");
+        hint.className = "muted-sm";
+        hint.textContent = "Select a repository to see tailored questions.";
+        container.append(hint);
+        return;
+    }
+
+    const suggestions = [];
+    const add = (label, question) => {
+        if (question && !suggestions.some(item => item.question === question) && suggestions.length < 4) {
+            suggestions.push({ label, question });
+        }
+    };
+    const shortPath = path => String(path || "").replace(/\\/g, "/").split("/").slice(-2).join("/");
+    const entities = (repoData.code_graph?.nodes || []).filter(node => node.kind === "entity" && node.name);
+    const entryPoint = repoData.architecture?.entry_points?.[0];
+    const pattern = repoData.patterns?.[0];
+    const issue = [...(repoData.bugs || []), ...(repoData.smells || [])]
+        .sort((a, b) => ({ critical: 4, high: 3, medium: 2, low: 1 }[b.severity] || 0) - ({ critical: 4, high: 3, medium: 2, low: 1 }[a.severity] || 0))[0];
+    const entity = entities.find(item => item.type === "class" || item.type === "function") || entities[0];
+
+    if (entryPoint?.name) add(`Trace ${entryPoint.name}`, `How does \`${entryPoint.name}\` start and flow through this repository?`);
+    if (entity?.name) add(`Explain ${entity.name}`, `Explain the role of \`${entity.name}\` in ${shortPath(entity.file_path)} and its main dependencies.`);
+    if (pattern?.name) add(`${pattern.name} pattern`, `How is the ${pattern.name} pattern used in ${shortPath(pattern.file_path)}?`);
+    if (issue?.type) add(`Review ${String(issue.type).replace(/_/g, " ")}`, `How should we fix the ${String(issue.type).replace(/_/g, " ")} reported in ${shortPath(issue.file_path)}?`);
+    if (suggestions.length < 3) add("Architecture", `What are the key modules and data flow in ${currentRepo}?`);
+    if (suggestions.length < 4) add("Dependencies", `Which components have the most important dependencies in ${currentRepo}?`);
+
+    suggestions.forEach(({ label, question }) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "eq-btn";
+        button.textContent = label;
+        button.addEventListener("click", () => setQ(question));
+        container.append(button);
+    });
 }
 
 function getRepo() {
@@ -154,6 +204,7 @@ async function analyzeRepository() {
         updateDashboardMetrics(data);
         await loadRepositories();
         document.getElementById("global-repo").value = data.repo_id;
+        renderSuggestedQuestions(await readApiResponse(await fetch(`${API}/repository/${encodeURIComponent(data.repo_id)}`)));
     } catch (err) {
         status.className = "alert alert-error";
         status.textContent = `Error: ${err.message}`;
@@ -214,6 +265,7 @@ async function loadRepositories() {
 function selectRepo(id) {
     currentRepo = id;
     document.getElementById("global-repo").value = id;
+    onGlobalRepoChange();
     showTab("overview");
     loadArchSummary();
 }
@@ -240,6 +292,7 @@ async function rebuildRepository(repoId, button) {
         await loadRepositories();
         document.getElementById("global-repo").value = repoId;
         updateDashboardMetrics(data);
+        renderSuggestedQuestions(await readApiResponse(await fetch(`${API}/repository/${encodeURIComponent(repoId)}`)));
         alert(`Search index rebuilt for ${repoId}. Try your question again.`);
     } catch (err) {
         alert(`Could not rebuild the search index: ${err.message}`);
@@ -254,13 +307,16 @@ async function loadArchSummary() {
     const repo = getRepo(); if (!repo) return;
     const box  = document.getElementById("arch-result");
     const text = document.getElementById("arch-text");
+    const model = document.getElementById("arch-model");
     box.style.display = "block";
+    model.textContent = "";
     text.innerHTML = `<span class="spinner"></span>Generating architecture summary…`;
 
     try {
         const res  = await fetch(`${API}/architecture-summary/${repo}`);
         const data = await res.json();
         text.innerHTML = marked.parse(data.summary || "No summary available.");
+        model.textContent = data.model ? `Answered by ${data.model}` : "";
 
         // Stats
         const repoData = await (await fetch(`${API}/repository/${repo}`)).json();
@@ -438,7 +494,283 @@ async function loadDebt() {
 }
 
 // ── Dependency Graph ─────────────────────────────────────────────
-async function loadGraph() {
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[char]));
+}
+
+function shortImpactPath(path) {
+    return String(path || "").replace(/\\/g, "/").split("/").slice(-2).join("/");
+}
+
+function populateImpactEntities(select, entities, repo, selectedId) {
+    if (select.dataset.repo === repo && select.options.length) {
+        if (selectedId) select.value = selectedId;
+        return;
+    }
+    select.replaceChildren();
+    entities.forEach(entity => {
+        const option = document.createElement("option");
+        option.value = entity.id;
+        option.textContent = entity.name + " — " + shortImpactPath(entity.file_path);
+        select.append(option);
+    });
+    select.dataset.repo = repo;
+    select.disabled = entities.length === 0;
+    if (selectedId) select.value = selectedId;
+}
+
+function impactListHtml(items, emptyMessage) {
+    if (!items?.length) return '<p class="muted-sm">' + escapeHtml(emptyMessage) + "</p>";
+    return '<ul class="impact-list">' + items.map(item =>
+        "<li><strong>" + escapeHtml(item.name) + "</strong><span>" +
+        escapeHtml(shortImpactPath(item.file_path)) + (item.line_number ? " : line " + item.line_number : "") +
+        "</span></li>"
+    ).join("") + "</ul>";
+}
+
+function impactGraphHtml(data) {
+    const selected = data.selected || {};
+    const dependencies = data.dependencies || [];
+    const dependents = data.dependents || [];
+    const width = 1020;
+    const laneTop = 78;
+    const rowHeight = 92;
+    const count = Math.max(dependencies.length, dependents.length, 1);
+    const height = Math.max(280, laneTop + count * rowHeight + 58);
+    const targetY = height / 2 - 36;
+
+    const graphNode = (node, x, y, kind, actionable = true) => {
+        const title = String(node.name || "Unknown").slice(0, 26);
+        const meta = (node.kind || "symbol") + " · " + shortImpactPath(node.file_path) +
+            (node.line_number ? " : " + node.line_number : "");
+        const interaction = actionable ? ' role="button" tabindex="0" data-impact-node-id="' + escapeHtml(node.id) +
+            '" aria-label="Assess impact of ' + escapeHtml(node.name) +
+            '" onclick="focusImpactNode(this.dataset.impactNodeId)" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();focusImpactNode(this.dataset.impactNodeId)}"' : "";
+        return '<g class="impact-flow-node ' + kind + (actionable ? " actionable" : "") + '" transform="translate(' + x + " " + y + ')"' + interaction + ">" +
+            '<rect width="220" height="72" rx="7"></rect><text class="impact-flow-title" x="14" y="29">' +
+            escapeHtml(title) + '</text><text class="impact-flow-meta" x="14" y="50">' + escapeHtml(meta.slice(0, 42)) + "</text></g>";
+    };
+    const emptyLane = (x, label) => '<g class="impact-flow-empty" transform="translate(' + x + " " + targetY + ')">' +
+        '<rect width="220" height="72" rx="7"></rect><text x="110" y="31" text-anchor="middle">No indexed ' + label +
+        '</text><text x="110" y="51" text-anchor="middle">in this analysis</text></g>';
+    const dependencyNodes = dependencies.map((node, index) => graphNode(node, 54, laneTop + index * rowHeight, "dependency")).join("");
+    const dependentNodes = dependents.map((node, index) => graphNode(node, 746, laneTop + index * rowHeight, "dependent")).join("");
+    const dependencyEdges = dependencies.map((node, index) => {
+        const y = laneTop + index * rowHeight + 36;
+        return '<path class="impact-flow-edge dependency" d="M 400 ' + (targetY + 36) + " L 274 " + y +
+            '" marker-end="url(#impact-arrow)"></path>';
+    }).join("");
+    const dependentEdges = dependents.map((node, index) => {
+        const y = laneTop + index * rowHeight + 36;
+        return '<path class="impact-flow-edge dependent" d="M 746 ' + y + " L 620 " + (targetY + 36) +
+            '" marker-end="url(#impact-arrow)"></path>';
+    }).join("");
+
+    return '<section class="impact-graph-section" aria-labelledby="impact-graph-title">' +
+        '<div class="impact-graph-heading"><div><p class="eyebrow">Static dependency analysis</p><h4 id="impact-graph-title">Change flow</h4></div>' +
+        '<span class="impact-analysis-badge">Indexed relationships · ' + Number(data.hops || 1) + "-hop depth</span></div>" +
+        '<div class="impact-flow-summary"><span>Dependencies</span><span>Proposed change</span><span>Potential callers</span></div>' +
+        '<div class="impact-graph-wrap"><svg class="impact-graph impact-flow" viewBox="0 0 ' + width + " " + height +
+        '" role="img" aria-label="Static dependency flow for ' + escapeHtml(selected.name || "the selected symbol") + '">' +
+        '<defs><marker id="impact-arrow" markerWidth="10" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z"></path></marker></defs>' +
+        dependencyEdges + dependentEdges + (dependencies.length ? dependencyNodes : emptyLane(54, "dependencies")) +
+        graphNode(selected, 400, targetY, "target", false) +
+        (dependents.length ? dependentNodes : emptyLane(746, "callers")) + "</svg></div>" +
+        '<div class="impact-legend"><span><i class="impact-legend-flow target"></i>Selected change</span>' +
+        '<span><i class="impact-legend-flow dependency"></i>Uses / relies on</span>' +
+        '<span><i class="impact-legend-flow dependent"></i>Calls / may be affected</span></div>' +
+        '<p class="impact-analysis-note">This view shows relationships resolved from the indexed source code. Dynamic dispatch, reflection, and runtime configuration may not appear.</p></section>';
+}
+
+function askImpactQuestion() {
+    const data = lastImpactData;
+    const selected = data?.selected;
+    if (!selected) return;
+
+    const dependencies = (data.dependencies || []).map(item => item.name).slice(0, 5);
+    const dependents = (data.dependents || []).map(item => item.name).slice(0, 5);
+    const question = "I am planning to change " + selected.name + " in " + shortImpactPath(selected.file_path) +
+        ". Assess the implementation risk, explain what could break, and give me a safe change and test plan." +
+        (dependents.length ? " Direct dependents: " + dependents.join(", ") + "." : " No direct dependents were detected.") +
+        (dependencies.length ? " It relies on: " + dependencies.join(", ") + "." : "");
+
+    showTab("query");
+    const input = document.getElementById("question-input");
+    input.value = question;
+    input.focus();
+    input.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function riskReviewHtml(review) {
+    const risk = review.risk || {};
+    const evidence = review.evidence || [];
+    const checklist = review.checklist || [];
+    const findings = review.findings || [];
+    return '<section class="risk-review risk-' + escapeHtml(risk.level || "low") + '" aria-labelledby="risk-review-title">' +
+        '<div class="risk-review-header"><div><p class="eyebrow">Change risk review</p><h3 id="risk-review-title">' +
+        escapeHtml(review.selected?.name) + '</h3><p class="muted-sm">' + escapeHtml(shortImpactPath(review.selected?.file_path)) +
+        '</p></div><div class="risk-score"><strong>' + Number(risk.score || 0) + '</strong><span>' + escapeHtml(risk.level || "low") +
+        ' risk</span></div></div><div class="risk-evidence">' + evidence.map(item =>
+            '<div><strong>' + Number(item.value || 0) + '</strong><span>' + escapeHtml(item.label) +
+            '</span><small>' + escapeHtml(item.detail) + '</small></div>').join("") + '</div>' +
+        '<div class="risk-columns"><div><h4>Release checklist</h4><ol>' + checklist.map(item => '<li>' + escapeHtml(item) +
+            '</li>').join("") + '</ol></div><div><h4>Findings in scope</h4>' +
+        (findings.length ? '<ul>' + findings.map(item => '<li><strong>' + escapeHtml(item.type) + '</strong> · ' +
+            escapeHtml(shortImpactPath(item.file_path)) + '</li>').join("") + '</ul>' :
+            '<p class="muted-sm">No static-analysis findings were recorded in the affected files.</p>') + '</div></div>' +
+        '<p class="risk-scope">' + escapeHtml(review.scope) + '</p><button class="btn btn-primary impact-ai-btn" type="button" onclick="askRiskQuestion()">Ask AI to review this change plan</button></section>';
+}
+
+async function loadChangeRisk() {
+    const repo = getRepo();
+    const selected = lastImpactData?.selected;
+    const container = document.getElementById("risk-review-result");
+    if (!repo || !selected?.id || !container) return;
+    container.innerHTML = '<span class="spinner"></span>Building an evidence-based change review…';
+    try {
+        const url = API + "/change-risk/" + encodeURIComponent(repo) + "?entity_id=" + encodeURIComponent(selected.id);
+        const review = await readApiResponse(await fetch(url));
+        lastRiskReview = review;
+        container.innerHTML = riskReviewHtml(review);
+    } catch (err) {
+        container.innerHTML = '<div class="alert alert-error">Could not build the risk review: ' + escapeHtml(err.message) + '</div>';
+    }
+}
+
+function askRiskQuestion() {
+    const review = lastRiskReview;
+    if (!review?.selected) return;
+    const findings = (review.findings || []).map(item => item.type).slice(0, 4);
+    const question = "Review this planned change: " + review.selected.name + " in " +
+        shortImpactPath(review.selected.file_path) + ". The static change-risk score is " + review.risk.score +
+        " (" + review.risk.level + "). Give a safe implementation plan, focused tests, rollback considerations, and address these findings: " +
+        (findings.length ? findings.join(", ") : "none recorded") + ".";
+    showTab("query");
+    const input = document.getElementById("question-input");
+    input.value = question;
+    input.focus();
+    input.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function focusImpactNode(nodeId) {
+    const entitySelect = document.getElementById("impact-entity");
+    if (!nodeId || !entitySelect || !Array.from(entitySelect.options).some(option => option.value === nodeId)) return;
+    entitySelect.value = nodeId;
+    loadImpactExplorer();
+}
+
+async function loadDependencyGraph() {
+    const repo = getRepo(); if (!repo) return;
+    const container = document.getElementById("dependency-graph-container");
+    container.innerHTML = '<span class="spinner"></span>Loading indexed relationships…';
+
+    if (!window.vis?.Network || !window.vis?.DataSet) {
+        container.innerHTML = '<div class="alert alert-error">The graph renderer could not load. Check your internet connection, then refresh the page.</div>';
+        return;
+    }
+
+    try {
+        const data = await readApiResponse(await fetch(API + "/dependency-graph/" + encodeURIComponent(repo)));
+        if (!data.nodes?.length) {
+            container.innerHTML = '<div class="empty-state"><p>No dependency data is available for this repository.</p></div>';
+            return;
+        }
+
+        container.replaceChildren();
+        const nodes = new vis.DataSet(data.nodes.map(node => {
+            const isFile = node.kind === "file";
+            const type = isFile ? "File" : (node.symbol_type || "Symbol");
+            const location = shortImpactPath(node.file_path) + (node.line_number ? " : line " + node.line_number : "");
+            return {
+                id: node.id,
+                label: node.label,
+                title: escapeHtml(type + " · " + location),
+                shape: isFile ? "box" : "ellipse",
+                borderWidth: isFile ? 1 : 2,
+                color: isFile
+                    ? { background: "#eef3f9", border: "#91a7c2", highlight: { background: "#e3ecf7", border: "#1d5dcc" } }
+                    : { background: "#172747", border: "#284b84", highlight: { background: "#1d5dcc", border: "#82adff" } },
+                font: { color: isFile ? "#24354e" : "#ffffff", face: "Inter, system-ui, sans-serif", size: isFile ? 12 : 13 },
+                margin: isFile ? 9 : 8,
+            };
+        }));
+        const edges = new vis.DataSet(data.edges.map(edge => ({
+            from: edge.from,
+            to: edge.to,
+            arrows: "to",
+            color: edge.type === "USES" ? { color: "#2e64c7", highlight: "#1d5dcc" } : { color: "#a8b9cd", highlight: "#6e89a9" },
+            width: edge.type === "USES" ? 2 : 1,
+            dashes: edge.type !== "USES",
+            title: edge.type === "USES" ? "uses" : "defines",
+            smooth: { type: "continuous", roundness: 0.18 },
+        })));
+        dependencyNetwork?.destroy();
+        dependencyNetwork = new vis.Network(container, { nodes, edges }, {
+            autoResize: true,
+            layout: { improvedLayout: true },
+            physics: {
+                enabled: true,
+                stabilization: { enabled: true, iterations: 180, updateInterval: 20 },
+                barnesHut: { gravitationalConstant: -4200, centralGravity: 0.24, springLength: 150, springConstant: 0.035 },
+            },
+            interaction: { hover: true, tooltipDelay: 180, navigationButtons: true, keyboard: true },
+        });
+        dependencyNetwork.on("click", params => {
+            const nodeId = params.nodes[0];
+            if (nodeId) focusImpactNode(nodeId);
+        });
+        const summary = document.createElement("p");
+        summary.className = "dependency-graph-summary";
+        summary.textContent = data.meta.node_count + " indexed nodes · " + data.meta.edge_count + " relationships · solid blue: usage · dashed gray: ownership";
+        container.append(summary);
+    } catch (err) {
+        container.innerHTML = '<div class="alert alert-error">Could not render the dependency graph: ' + escapeHtml(err.message) + "</div>";
+    }
+}
+
+function renderImpactResult(container, data) {
+    const selected = data.selected || {};
+    const impact = data.impact || {};
+    lastImpactData = data;
+    container.innerHTML =
+        '<div class="impact-target"><p class="eyebrow">Selected change target</p><h3>' +
+        escapeHtml(selected.name) + "</h3><p class=\"muted-sm\">" +
+        escapeHtml(shortImpactPath(selected.file_path)) + (selected.line_number ? " : line " + selected.line_number : "") +
+        '</p><div class="impact-actions"><button class="btn btn-primary impact-ai-btn" type="button" onclick="askImpactQuestion()">Ask AI about this impact</button><button class="btn impact-ai-btn" type="button" onclick="loadChangeRisk()">Review change risk</button></div></div>' +
+        '<div class="stats-grid impact-stats">' +
+        '<div class="stat-box"><strong>' + Number(impact.direct_dependents || 0) + '</strong><span>Direct dependents</span></div>' +
+        '<div class="stat-box"><strong>' + Number(impact.related_symbols || 0) + '</strong><span>Related symbols within ' + Number(data.hops || 1) + ' hop(s)</span></div>' +
+        "</div>" +
+        impactGraphHtml(data) +
+        '<div class="impact-columns"><div><h4>What could break</h4>' +
+        impactListHtml(data.dependents, "No direct callers or dependents were detected.") +
+        "</div><div><h4>What this change relies on</h4>" +
+        impactListHtml(data.dependencies, "No direct dependencies were detected.") +
+        '</div></div><div id="risk-review-result" class="risk-review-result"><p class="muted-sm">Run a change risk review for an evidence-based checklist.</p></div>';
+}
+
+async function loadImpactExplorer() {
+    const repo = getRepo(); if (!repo) return;
+    const container = document.getElementById("impact-result");
+    const entitySelect = document.getElementById("impact-entity");
+    const hops = document.getElementById("impact-hops").value;
+    container.innerHTML = '<span class="spinner"></span>Assessing change impact...';
+
+    try {
+        const focus = entitySelect.dataset.repo === repo ? entitySelect.value : "";
+        const url = API + "/impact-explorer/" + encodeURIComponent(repo) +
+            "?focus=" + encodeURIComponent(focus) + "&hops=" + encodeURIComponent(hops);
+        const data = await readApiResponse(await fetch(url));
+        populateImpactEntities(entitySelect, data.available_entities || [], repo, data.selected?.id);
+        renderImpactResult(container, data);
+    } catch (err) {
+        container.innerHTML = '<span style="color:var(--error)">' + escapeHtml(err.message) + "</span>";
+    }
+}
+
+/* Legacy dependency-graph renderer retained for reference only.
     const repo = getRepo(); if (!repo) return;
     const container = document.getElementById("graph-container");
     container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)"><span class="spinner"></span>Building graph…</div>`;
@@ -459,9 +791,12 @@ async function loadGraph() {
 }
 
 // ── AI Tools ─────────────────────────────────────────────────────
-function showToolResult(html) {
+*/
+function showToolResult(html, { title = "AI result", model = "" } = {}) {
     document.getElementById("tool-result").style.display = "block";
     document.getElementById("tool-text").innerHTML = html;
+    document.getElementById("tool-result-title").textContent = title;
+    document.getElementById("tool-model").textContent = model ? `Answered by ${model}` : "";
 }
 
 async function explainEntity() {
@@ -472,7 +807,7 @@ async function explainEntity() {
     try {
         const res  = await fetch(`${API}/explain/${repo}?entity_name=${encodeURIComponent(name)}`, { method: "POST" });
         const data = await res.json();
-        showToolResult(res.ok ? marked.parse(data.explanation) + learningResourcesHtml(data.learning_resources) : `<span style="color:var(--error)">${data.detail}</span>`);
+        showToolResult(res.ok ? marked.parse(data.explanation) + learningResourcesHtml(data.learning_resources) : `<span style="color:var(--error)">${data.detail}</span>`, { title: "Explain entity", model: data.model });
     } catch (err) { showToolResult(`<span style="color:var(--error)">${err.message}</span>`); }
 }
 
@@ -484,7 +819,7 @@ async function findImplementation() {
     try {
         const res  = await fetch(`${API}/find/${repo}?feature=${encodeURIComponent(feat)}`, { method: "POST" });
         const data = await res.json();
-        showToolResult(res.ok ? marked.parse(data.implementation) + learningResourcesHtml(data.learning_resources) : `<span style="color:var(--error)">${data.detail}</span>`);
+        showToolResult(res.ok ? marked.parse(data.implementation) + learningResourcesHtml(data.learning_resources) : `<span style="color:var(--error)">${data.detail}</span>`, { title: "Find implementation", model: data.model });
     } catch (err) { showToolResult(`<span style="color:var(--error)">${err.message}</span>`); }
 }
 
@@ -494,7 +829,7 @@ async function getRefactoring() {
     try {
         const res  = await fetch(`${API}/refactor/${repo}`, { method: "POST" });
         const data = await res.json();
-        showToolResult(res.ok ? marked.parse(data.suggestions) : `<span style="color:var(--error)">${data.detail}</span>`);
+        showToolResult(res.ok ? marked.parse(data.suggestions) : `<span style="color:var(--error)">${data.detail}</span>`, { title: "Refactoring suggestions", model: data.model });
     } catch (err) { showToolResult(`<span style="color:var(--error)">${err.message}</span>`); }
 }
 
@@ -507,7 +842,7 @@ async function generateTests() {
         const res  = await fetch(`${API}/generate-tests/${repo}?entity_name=${encodeURIComponent(name)}`, { method: "POST" });
         const data = await res.json();
         if (res.ok) {
-            showToolResult(`<p style="color:var(--text-muted);margin-bottom:10px">Framework: <strong>${data.framework}</strong></p>` + marked.parse("```python\n" + data.tests + "\n```"));
+            showToolResult(`<p style="color:var(--text-muted);margin-bottom:10px">Framework: <strong>${data.framework}</strong></p>` + marked.parse("```python\n" + data.tests + "\n```"), { title: "Generated tests", model: data.model });
         } else {
             showToolResult(`<span style="color:var(--error)">${data.detail}</span>`);
         }

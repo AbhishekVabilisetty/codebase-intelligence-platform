@@ -6,6 +6,7 @@ A FastAPI and browser-based workspace for analyzing public GitHub repositories. 
 
 - Parse Python and JavaScript/TypeScript source into entities and code chunks.
 - Embed code chunks and retrieve relevant snippets for repository questions.
+- Expand semantic results through a code knowledge graph of files, symbols, and resolved usages (hybrid GraphRAG).
 - Generate answers, architecture summaries, implementation explanations, refactoring suggestions, and test drafts grounded in retrieved code.
 - Detect potential bugs, code smells, design patterns, and technical debt.
 - Explore entity relationships in a dependency graph and review saved repository reports.
@@ -29,6 +30,9 @@ A FastAPI and browser-based workspace for analyzing public GitHub repositories. 
 ├── docker-compose.yml
 └── README.md
 ```
+
+For the end-to-end pipeline, directory responsibilities, and a suggested demo order, see [docs/PROJECT_FLOW.md](docs/PROJECT_FLOW.md).
+The current source flow is `analyzers` → `embeddings` + `graphrag` → `rag`, orchestrated by `api.py`; focused checks live in `backend/tests/`.
 
 ## Tech Stack
 
@@ -69,6 +73,12 @@ python -m http.server 3000
 Open `http://127.0.0.1:3000` in your browser. The frontend expects the API at
 `http://localhost:8000`.
 
+Run the automated checks from the `backend` directory:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Configuration
 
 Copy `backend/.env.example` to `backend/.env`, then configure:
@@ -83,5 +93,6 @@ Never commit `backend/.env`; it is excluded by `.gitignore`.
 ## Runtime notes
 
 - Generated repositories, vector data, and cached reports live in `backend/temp_repos/`, `backend/chroma_db/`, and `backend/cache/`. They are intentionally ignored by Git.
-- Code is indexed with NVIDIA `nvidia/nemotron-3-embed-1b` in `passage` mode; questions use `query` mode.
+- Code is indexed with NVIDIA `nvidia/nemotron-3-embed-1b` in `passage` mode; questions use `query` mode. Query, explain, and find operations then expand the semantic matches up to two hops through the saved code graph and retrieve the connected indexed chunks.
+- Re-analyze an existing repository once to create its code graph. Older cached analyses continue to use vector-only retrieval until reindexed.
 - After changing embedding models, rebuild each repository's search index. Use the **Rebuild search index** action in the Repositories view; this reclones and re-embeds the source.
